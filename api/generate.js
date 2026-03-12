@@ -28,16 +28,14 @@ function extractBalancedJson(text) {
     if (char === "{") depth += 1;
     if (char === "}") {
       depth -= 1;
-      if (depth === 0) {
-        return text.slice(start, i + 1);
-      }
+      if (depth === 0) return text.slice(start, i + 1);
     }
   }
 
   return "";
 }
 
-function repairCommonJsonIssues(text) {
+function cleanJsonText(text) {
   return text
     .replace(/```json|```/gi, "")
     .replace(/[\u201C\u201D]/g, '"')
@@ -45,19 +43,59 @@ function repairCommonJsonIssues(text) {
     .trim();
 }
 
-function parseModelJson(rawText) {
-  const cleaned = repairCommonJsonIssues(rawText);
+function tryParseJson(rawText) {
+  const cleaned = cleanJsonText(rawText);
 
   try {
     return JSON.parse(cleaned);
   } catch {
     const extracted = extractBalancedJson(cleaned);
-    if (!extracted) {
-      throw new Error("Model returned malformed JSON.");
-    }
+    if (!extracted) return null;
 
-    return JSON.parse(repairCommonJsonIssues(extracted));
+    try {
+      return JSON.parse(cleanJsonText(extracted));
+    } catch {
+      return null;
+    }
   }
+}
+
+async function callGemini({ apiKey, model, prompt, temperature = 0.2, topP = 0.8 }) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: prompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature,
+          topP,
+          maxOutputTokens: 2200,
+          responseMimeType: "application/json"
+        }
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.error?.message || "Provider request failed.");
+  }
+
+  return data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
 }
 
 export default async function handler(req, res) {
@@ -75,6 +113,9 @@ export default async function handler(req, res) {
     if (!platform?.trim()) {
       return res.status(400).json({ error: "Platform is required." });
     }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const model = "gemini-2.5-flash";
 
     const SYSTEM_PROMPT = `You are a viral content strategist who has grown multiple accounts to 100k+ followers.
 You generate content ideas that get massive engagement.
@@ -106,53 +147,53 @@ Extra context: ${context || "None"}
 
 Make each idea genuinely different. Vary the angles. Make the hooks scroll-stopping.`;
 
-    const model = "gemini-2.5-flash";
-    const apiKey = process.env.GEMINI_API_KEY;
+    const firstText = await callGemini({
+      apiKey,
+      model,
+      prompt: `${SYSTEM_PROMPT}\n\n${userPrompt}`,
+      temperature: 0.2,
+      topP: 0.8
+    });
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `${SYSTEM_PROMPT}\n\n${userPrompt}`
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.2,
-            topP: 0.8,
-            maxOutputTokens: 2200,
-            responseMimeType: "application/json"
-          }
-        })
-      }
-    );
+    let parsed = tryParseJson(firstText);
 
-    const data = await response.json();
+    if (!parsed) {
+      const repairPrompt = `You repair malformed JSON.
 
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: data?.error?.message || "Provider request failed."
+Return ONLY valid JSON with this exact structure:
+{
+  "ideas": [
+    {
+      "id": 1,
+      "hook": "...",
+      "angle": "...",
+      "outline": ["...", "...", "..."],
+      "why_it_works": "...",
+      "viral_score": 85
+    }
+  ],
+  "niche_insight": "..."
+}
+
+Fix this malformed JSON and output only corrected JSON:
+
+${firstText}`;
+
+      const repairedText = await callGemini({
+        apiKey,
+        model,
+        prompt: repairPrompt,
+        temperature: 0,
+        topP: 0.1
       });
+
+      parsed = tryParseJson(repairedText);
     }
 
-    const text =
-      data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
-
-    if (!text.trim()) {
-      return res.status(502).json({ error: "Empty model response." });
+    if (!parsed) {
+      return res.status(500).json({ error: "AI response could not be repaired into valid JSON." });
     }
 
-    const parsed = parseModelJson(text);
     return res.status(200).json(parsed);
   } catch (error) {
     return res.status(500).json({
