@@ -1,3 +1,65 @@
+function extractBalancedJson(text) {
+  const start = text.indexOf("{");
+  if (start === -1) return "";
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+
+  return "";
+}
+
+function repairCommonJsonIssues(text) {
+  return text
+    .replace(/```json|```/gi, "")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .trim();
+}
+
+function parseModelJson(rawText) {
+  const cleaned = repairCommonJsonIssues(rawText);
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const extracted = extractBalancedJson(cleaned);
+    if (!extracted) {
+      throw new Error("Model returned malformed JSON.");
+    }
+
+    return JSON.parse(repairCommonJsonIssues(extracted));
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -66,7 +128,7 @@ Make each idea genuinely different. Vary the angles. Make the hooks scroll-stopp
             }
           ],
           generationConfig: {
-            temperature: 0.3,
+            temperature: 0.2,
             topP: 0.8,
             maxOutputTokens: 2200,
             responseMimeType: "application/json"
@@ -90,7 +152,7 @@ Make each idea genuinely different. Vary the angles. Make the hooks scroll-stopp
       return res.status(502).json({ error: "Empty model response." });
     }
 
-    const parsed = JSON.parse(text.replace(/```json|```/gi, "").trim());
+    const parsed = parseModelJson(text);
     return res.status(200).json(parsed);
   } catch (error) {
     return res.status(500).json({
